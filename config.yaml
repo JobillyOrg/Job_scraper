@@ -1,0 +1,64 @@
+# USA job scrape. Edit queries and the ATS company list, then:
+#   python -m job_scraper
+
+query: software engineer
+location: United States
+country_indeed: USA
+results_wanted: 100
+hours_old: 168
+linkedin_fetch_description: false
+usa_only: true
+
+boards:
+  - indeed
+  - zip_recruiter
+  - linkedin
+
+# Public career-board slugs (from the company's ATS URL).
+ats:
+  greenhouse:
+    - stripe
+    - anthropic
+    - airbnb
+    - databricks
+    - figma
+  lever:
+    - palantir
+    - spotify
+    - plaid
+  ashby:
+    - openai
+    - ramp
+    - notion
+  workable:
+    - huggingface
+  smartrecruiters:
+    - Visa
+  recruitee: []
+  workday:
+    - name: NVIDIA
+      url: https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite
+    - name: Intel
+      url: https://intel.wd1.myworkdayjobs.com/External
+  bamboohr:
+    - flyio
+  personio:
+    - personio
+  breezy:
+    - northbeam
+  teamtailor:
+    - polestar
+  pinpoint:
+    - workwithus
+  jazzhr: []
+  manatal: []
+  polymer: []
+  icims: []
+  paylocity: []
+  paycom: []
+  successfactors: []
+  ycombinator:
+    - all
+
+output: output/jobs.csv
+max_jobs_per_board: 400

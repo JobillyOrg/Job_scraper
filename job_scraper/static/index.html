@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Job scraper</title>
+    <link rel="stylesheet" href="/static/styles.css?v=6" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">USA listings</p>
+          <h1>Job scraper</h1>
+          <p class="lede">
+            Search LinkedIn, Indeed, ZipRecruiter, and public ATS career pages
+            (Greenhouse, Lever, Ashby, Workday, BambooHR, Y Combinator, and more).
+          </p>
+        </div>
+        <div class="hero-stats" id="hero-stats">
+          <div><strong id="stat-total">0</strong><span>jobs</span></div>
+          <div><strong id="stat-sources">0</strong><span>sources</span></div>
+        </div>
+      </header>
+
+      <form id="search-form" class="panel">
+        <div class="fields">
+          <label>
+            Role
+            <input id="query" name="query" type="text" required placeholder="software engineer" />
+          </label>
+          <label>
+            Location
+            <input id="location" name="location" type="text" placeholder="Austin, TX" />
+          </label>
+          <label>
+            Results / board
+            <input id="results" name="results" type="number" min="5" max="200" value="100" />
+          </label>
+        </div>
+
+        <div class="source-block">
+          <p class="source-label">Job boards</p>
+          <div class="chips" id="board-chips"></div>
+        </div>
+        <div class="source-block">
+          <p class="source-label">ATS career pages</p>
+          <div class="chips" id="ats-chips"></div>
+        </div>
+
+        <div class="actions">
+          <label class="check">
+            <input id="usa-only" type="checkbox" checked />
+            USA / remote only
+          </label>
+          <p class="status" id="status"></p>
+          <button type="submit" id="submit">Fetch jobs</button>
+        </div>
+      </form>
+
+      <section class="results">
+        <div class="results-bar">
+          <input id="filter" type="search" placeholder="Filter by company, location, source, or JD" />
+          <div class="source-filters" id="source-filters"></div>
+        </div>
+        <div id="empty" class="empty">No jobs yet. Run a search above.</div>
+        <div class="table-wrap">
+          <table id="table" hidden>
+            <thead>
+              <tr>
+                <th>Company</th>
+                <th>Location</th>
+                <th>Posted date</th>
+                <th>Source</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="tbody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script src="/static/app.js?v=6"></script>
+  </body>
+</html>
