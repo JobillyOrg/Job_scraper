@@ -170,14 +170,30 @@ function closeOpenJd() {
 function formatDate(value) {
   if (!value) return "—";
   const text = String(value).trim();
-  if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text.slice(0, 10);
+  if (/just now|moments? ago|\d+\s*(minutes?|hours?)\s+ago/i.test(text)) return text;
+
+  let date = null;
+  const hasClock = /T\d{2}:|\d{2}:\d{2}|^\d{10,13}$/.test(text);
   if (/^\d{10,13}$/.test(text)) {
     const ms = text.length > 10 ? Number(text) : Number(text) * 1000;
-    const date = new Date(ms);
-    if (!Number.isNaN(date.getTime())) return date.toISOString().slice(0, 10);
+    date = new Date(ms);
+  } else {
+    const parsed = Date.parse(text);
+    if (!Number.isNaN(parsed)) date = new Date(parsed);
   }
-  const parsed = Date.parse(text);
-  if (!Number.isNaN(parsed)) return new Date(parsed).toISOString().slice(0, 10);
+  if (date && !Number.isNaN(date.getTime()) && hasClock) {
+    const hours = (Date.now() - date.getTime()) / 3600000;
+    if (hours >= 0 && hours < 24) {
+      if (hours < 1) {
+        const minutes = Math.max(1, Math.round(hours * 60));
+        return minutes < 2 ? "just now" : `${minutes} min ago`;
+      }
+      const whole = Math.max(1, Math.round(hours));
+      return whole === 1 ? "1 hour ago" : `${whole} hours ago`;
+    }
+  }
+  if (date && !Number.isNaN(date.getTime())) return date.toISOString().slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text.slice(0, 10);
   return text;
 }
 

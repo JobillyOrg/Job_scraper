@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Iterable
 
 from job_scraper.models import Job
@@ -9,6 +10,8 @@ from job_scraper.normalize import format_posted_date, join_location
 logger = logging.getLogger(__name__)
 
 BOARD_SITES = ("indeed", "linkedin", "zip_recruiter", "google", "glassdoor")
+_LINKEDIN_RELATIVE: dict[str, str] = {}
+_LINKEDIN_VIEW_ID = re.compile(r"/jobs/view/(\d+)")
 
 
 def scrape_boards(
@@ -44,6 +47,8 @@ def scrape_boards(
         kwargs["proxies"] = proxies
 
     logger.info("Scraping boards %s for %r in %r", sites, query, location)
+    _LINKEDIN_RELATIVE.clear()
+    _patch_linkedin_listed_times()
     try:
         frame = scrape_jobs(**kwargs)
     except TypeError:
@@ -84,17 +89,55 @@ def _from_jobspy(row: dict[str, Any]) -> Job:
         salary = f"{val('min_amount')}-{val('max_amount')} {val('interval')} {val('currency')}".strip()
 
     location = val("location") or join_location(val("city"), val("state"), val("country"))
+    url = val("job_url", "job_url_direct")
+    listed = ""
+    match = _LINKEDIN_VIEW_ID.search(url)
+    if match:
+        listed = _LINKEDIN_RELATIVE.get(match.group(1), "")
+
+    posted = format_posted_date(listed)
+    if not posted or not re.match(r"^\d{4}-\d{2}-\d{2}", posted):
+        posted = format_posted_date(val("date_posted")) or posted
 
     return Job(
         title=val("title"),
         company=val("company"),
         source=val("site") or "jobspy",
-        url=val("job_url", "job_url_direct"),
+        url=url,
         location=location,
         is_remote=is_remote,
         job_type=val("job_type"),
-        date_posted=format_posted_date(val("date_posted")),
+        date_posted=posted,
         description=val("description"),
         salary=salary,
         apply_url=val("job_url_direct", "job_url"),
     )
+
+
+def _patch_linkedin_listed_times() -> None:
+    try:
+        from jobspy.linkedin import LinkedIn
+    except ImportError:
+        return
+    if getattr(LinkedIn._process_job, "_listed_patched", False):
+        return
+
+    original = LinkedIn._process_job
+
+    def _process_job(self, job_card, job_id, full_descr):  # type: ignore[no-untyped-def]
+        post = original(self, job_card, job_id, full_descr)
+        metadata = job_card.find("div", class_="base-search-card__metadata") if job_card else None
+        time_tag = None
+        if metadata:
+            time_tag = metadata.find(
+                "time",
+                class_=lambda value: bool(value and "job-search-card__listdate" in str(value)),
+            ) or metadata.find("time")
+        if time_tag is not None:
+            label = time_tag.get_text(" ", strip=True)
+            stamp = time_tag.get("datetime") or ""
+            _LINKEDIN_RELATIVE[str(job_id)] = label or stamp
+        return post
+
+    _process_job._listed_patched = True  # type: ignore[attr-defined]
+    LinkedIn._process_job = _process_job

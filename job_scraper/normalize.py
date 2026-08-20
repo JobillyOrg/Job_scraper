@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import html
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
 from typing import Any
 
@@ -66,26 +66,95 @@ def join_location(*parts: str | None) -> str:
     return ", ".join(values)
 
 
+_RELATIVE_HOURS = re.compile(
+    r"""
+    ^(?:posted\s+)?
+    (?:
+        (?P<just>just\s+now|moments?\s+ago|now)
+        | (?P<minutes>an?|1|\d+)\s+minutes?\s+ago
+        | (?P<hours>an?|1|\d+)\s+hours?\s+ago
+    )
+    $
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
 def format_posted_date(value: Any) -> str:
+    """Store a date, or an ISO timestamp when the job is less than 24 hours old."""
     if value is None:
         return ""
     if isinstance(value, datetime):
-        return value.date().isoformat()
+        return _from_datetime(value, has_clock=_has_clock(value))
+    if isinstance(value, date):
+        return value.isoformat()
+
     text = str(value).strip()
     if not text or text.lower() in {"nan", "none"}:
         return ""
+
+    relative = _relative_under_24h(text)
+    if relative is not None:
+        return _from_datetime(datetime.now(timezone.utc) - relative, has_clock=True)
+
     if re.fullmatch(r"\d{10,13}", text):
         stamp = int(text)
         if stamp > 10_000_000_000:
             stamp //= 1000
         try:
-            return datetime.fromtimestamp(stamp, tz=timezone.utc).date().isoformat()
+            return _from_datetime(datetime.fromtimestamp(stamp, tz=timezone.utc), has_clock=True)
         except (OverflowError, OSError, ValueError):
             return text
+
     iso = text.replace("Z", "+00:00")
     try:
-        return datetime.fromisoformat(iso).date().isoformat()
+        parsed = datetime.fromisoformat(iso)
     except ValueError:
-        pass
+        parsed = None
+    if parsed is not None:
+        has_clock = bool(re.search(r"T\d{2}:|\d{2}:\d{2}", iso))
+        if parsed.tzinfo is None and has_clock:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        if has_clock:
+            return _from_datetime(parsed, has_clock=True)
+        return parsed.date().isoformat()
+
     cleaned = re.sub(r"^posted\s+", "", text, flags=re.IGNORECASE).strip()
     return cleaned
+
+
+def _has_clock(value: datetime) -> bool:
+    return not (value.hour == 0 and value.minute == 0 and value.second == 0 and value.microsecond == 0)
+
+
+def _from_datetime(value: datetime, has_clock: bool) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    aware = value.astimezone(timezone.utc)
+    if has_clock:
+        age = datetime.now(timezone.utc) - aware
+        if timedelta(0) <= age < timedelta(hours=24):
+            return aware.isoformat(timespec="seconds")
+    return aware.date().isoformat()
+
+
+def _relative_under_24h(text: str) -> timedelta | None:
+    cleaned = re.sub(r"^posted\s+", "", text.strip(), flags=re.IGNORECASE)
+    match = _RELATIVE_HOURS.fullmatch(cleaned)
+    if not match:
+        return None
+    if match.group("just"):
+        return timedelta(0)
+    if match.group("minutes"):
+        raw = match.group("minutes").lower()
+        minutes = 1 if raw in {"a", "an", "1"} else int(raw)
+        if minutes >= 24 * 60:
+            return None
+        return timedelta(minutes=minutes)
+    if match.group("hours"):
+        raw = match.group("hours").lower()
+        hours = 1 if raw in {"a", "an", "1"} else int(raw)
+        if hours >= 24:
+            return None
+        return timedelta(hours=hours)
+    return None
