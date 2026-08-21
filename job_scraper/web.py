@@ -16,6 +16,7 @@ from job_scraper.config import load_config
 from job_scraper.db import import_csv_if_empty, list_jobs
 from job_scraper.group import group_jobs
 from job_scraper.models import Job
+from job_scraper.progress import Progress
 from job_scraper.run import persist_jobs, run_scrape
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -24,7 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 STATIC = Path(__file__).resolve().parent / "static"
 CONFIG_PATH = ROOT / "config.yaml"
 
-BOARD_OPTIONS = ["indeed", "linkedin", "zip_recruiter"]
+BOARD_OPTIONS = ["indeed", "linkedin", "zip_recruiter", "freehire"]
 ATS_OPTIONS = [
     "greenhouse",
     "ashby",
@@ -89,6 +90,13 @@ def _counts(jobs: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def _set_progress(run_id: str, snap: dict[str, Any]) -> None:
+    with _lock:
+        run = _runs.get(run_id)
+        if run and run.get("status") == "running":
+            run["progress"] = snap
+
+
 def _execute_search(run_id: str, request: SearchRequest) -> None:
     config = _base_config()
     config["query"] = request.query.strip()
@@ -103,10 +111,15 @@ def _execute_search(run_id: str, request: SearchRequest) -> None:
         for name, companies in (config.get("ats") or {}).items()
         if name in selected_ats
     }
+    progress = Progress(lambda snap: _set_progress(run_id, snap))
     try:
-        jobs = run_scrape(config)
+        jobs = run_scrape(config, progress=progress)
+        progress.set_message("Saving results…")
         stats = persist_jobs(jobs, ROOT / "output" / "jobs.csv", query=request.query)
         payload = _public_jobs(jobs)
+        snap = progress.snapshot()
+        snap["percent"] = 100
+        snap["message"] = "Done"
         with _lock:
             _runs[run_id] = {
                 "status": "done",
@@ -114,6 +127,7 @@ def _execute_search(run_id: str, request: SearchRequest) -> None:
                 "counts": _counts(payload),
                 "saved": stats,
                 "error": None,
+                "progress": snap,
             }
     except Exception as exc:
         logging.exception("Search failed")
@@ -123,6 +137,7 @@ def _execute_search(run_id: str, request: SearchRequest) -> None:
                 "jobs": [],
                 "counts": {},
                 "error": str(exc),
+                "progress": {"done": 0, "total": 0, "percent": 0, "message": "Search failed"},
             }
 
 
@@ -161,7 +176,13 @@ def start_search(request: SearchRequest) -> dict[str, str]:
         if any(run.get("status") == "running" for run in _runs.values()):
             raise HTTPException(status_code=409, detail="A search is already running.")
         run_id = str(uuid.uuid4())
-        _runs[run_id] = {"status": "running", "jobs": [], "counts": {}, "error": None}
+        _runs[run_id] = {
+            "status": "running",
+            "jobs": [],
+            "counts": {},
+            "error": None,
+            "progress": {"done": 0, "total": 0, "percent": 0, "message": "Starting…"},
+        }
     thread = threading.Thread(target=_execute_search, args=(run_id, request), daemon=True)
     thread.start()
     return {"id": run_id}

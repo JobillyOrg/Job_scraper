@@ -2,6 +2,7 @@ const LABELS = {
   indeed: "Indeed",
   linkedin: "LinkedIn",
   zip_recruiter: "ZipRecruiter",
+  freehire: "Freehire",
   greenhouse: "Greenhouse",
   ashby: "Ashby",
   lever: "Lever",
@@ -48,6 +49,28 @@ function selected(id) {
 
 function setStatus(text) {
   statusEl.textContent = text || "";
+}
+
+const progressEl = document.getElementById("progress");
+const progressFill = document.getElementById("progress-fill");
+const progressLabel = document.getElementById("progress-label");
+
+function showProgress(progress, running) {
+  if (!progressEl) return;
+  if (!progress && !running) {
+    progressEl.hidden = true;
+    progressEl.classList.remove("is-busy");
+    return;
+  }
+  progressEl.hidden = false;
+  const percent = Math.max(0, Math.min(100, Number(progress?.percent || 0)));
+  const done = progress?.done || 0;
+  const total = progress?.total || 0;
+  const message = progress?.message || (running ? "Fetching…" : "");
+  progressFill.style.width = `${percent}%`;
+  progressEl.classList.toggle("is-busy", Boolean(running) && percent < 100);
+  const counts = total ? `${done}/${total}` : "";
+  progressLabel.textContent = [message, counts].filter(Boolean).join(" · ");
 }
 
 function renderJobs(jobs) {
@@ -214,19 +237,25 @@ async function poll(id, started) {
   const data = await res.json();
   const elapsed = Math.round((Date.now() - started) / 1000);
   if (data.status === "running") {
-    setStatus(`Fetching… ${elapsed}s`);
-    setTimeout(() => poll(id, started), 1500);
+    showProgress(data.progress, true);
+    const pct = data.progress?.percent;
+    const label = data.progress?.message || "Fetching";
+    setStatus(pct != null ? `${label} · ${elapsed}s` : `Fetching… ${elapsed}s`);
+    setTimeout(() => poll(id, started), 800);
     return;
   }
   submitBtn.disabled = false;
   if (data.status === "error") {
+    showProgress(null, false);
     setStatus(data.error || "Search failed");
     return;
   }
+  showProgress({ ...(data.progress || {}), percent: 100, message: "Done" }, false);
   setStatus(
     `${(data.jobs || []).length} jobs in ${elapsed}s · saved ${data.saved?.inserted || 0} new, ${data.saved?.updated || 0} updated`
   );
   showJobs(data.jobs, data.counts);
+  setTimeout(() => showProgress(null, false), 1200);
 }
 
 form.addEventListener("submit", async (event) => {
@@ -241,6 +270,7 @@ form.addEventListener("submit", async (event) => {
   };
   submitBtn.disabled = true;
   setStatus("Starting search…");
+  showProgress({ percent: 0, done: 0, total: 0, message: "Starting…" }, true);
   const res = await fetch("/api/search", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

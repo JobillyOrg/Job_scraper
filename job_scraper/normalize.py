@@ -158,3 +158,14 @@ def _relative_under_24h(text: str) -> timedelta | None:
             return None
         return timedelta(hours=hours)
     return None
+
+
+def title_matches(title: str, query: str) -> bool:
+    q = (query or "").strip().lower()
+    if not q:
+        return True
+    hay = (title or "").lower()
+    if q in hay:
+        return True
+    tokens = [tok for tok in re.findall(r"[a-z0-9]+", q) if tok not in {"and", "or", "the", "a"}]
+    return bool(tokens) and all(tok in hay for tok in tokens)

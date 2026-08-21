@@ -4,7 +4,7 @@ A personal job-search tool. It collects **US and remote** openings for a role yo
 
 It does not log in. It only reads public listings:
 
-1. **Job boards** — Indeed, LinkedIn, ZipRecruiter (search by role and location).
+1. **Job boards** — Indeed, LinkedIn, ZipRecruiter, and Freehire (search by role and location).
 2. **Company career pages** — public ATS boards you list in `config.yaml` (Greenhouse, Lever, Ashby, Workable, SmartRecruiters, Recruitee, BambooHR, Personio, Workday, iCIMS, Paylocity, Paycom, SuccessFactors, Breezy, Teamtailor, Pinpoint, JazzHR, Manatal, Polymer).
 3. **Y Combinator** — public Work at a Startup listings (one switch, not a per-company slug).
 
@@ -55,6 +55,7 @@ python -m job_scraper --out output/jobs.json
 | Source | What you put in `config.yaml` |
 | --- | --- |
 | Indeed, ZipRecruiter, LinkedIn | `query` and `location`. Keep `country_indeed: USA`. |
+| Freehire | Same search query. Public Freehire job index (`countries=us` when USA-only is on). |
 | Greenhouse | Slug from `boards.greenhouse.io/stripe` → `stripe` |
 | Lever | Slug from `jobs.lever.co/spotify` → `spotify` |
 | Ashby | Slug from `jobs.ashbyhq.com/openai` → `openai` |

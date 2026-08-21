@@ -8,7 +8,9 @@ from urllib.parse import urlparse
 from job_scraper.ats_extra import EXTRA_FETCHERS, extra_detect
 from job_scraper.http import Http
 from job_scraper.models import Job
-from job_scraper.normalize import format_posted_date, html_to_text, join_location, looks_usa
+from job_scraper.normalize import format_posted_date, html_to_text, join_location, looks_usa, title_matches
+from job_scraper.parallel import map_pool
+from job_scraper.progress import Progress
 
 logger = logging.getLogger(__name__)
 
@@ -155,8 +157,13 @@ def fetch_workable(http: Http, slug: str, company: str | None = None) -> list[Jo
     return jobs
 
 
-def fetch_smartrecruiters(http: Http, slug: str, company: str | None = None) -> list[Job]:
-    jobs: list[Job] = []
+def fetch_smartrecruiters(
+    http: Http,
+    slug: str,
+    company: str | None = None,
+    query: str | None = None,
+) -> list[Job]:
+    listings: list[dict[str, Any]] = []
     offset = 0
     limit = 100
     while True:
@@ -168,50 +175,52 @@ def fetch_smartrecruiters(http: Http, slug: str, company: str | None = None) -> 
         response.raise_for_status()
         payload = response.json() or {}
         batch = payload.get("content") or []
-        for item in batch:
-            loc = item.get("location") or {}
-            location = loc.get("fullLocation") or join_location(
-                loc.get("city"), loc.get("region"), loc.get("country")
-            )
-            dept = item.get("department") or {}
-            emp = item.get("typeOfEmployment") or {}
-            company_obj = item.get("company") or {}
-            posting_id = str(item.get("id") or "")
-            detail_url = f"https://api.smartrecruiters.com/v1/companies/{slug}/postings/{posting_id}"
-            description = ""
-            if posting_id:
-                try:
-                    detail = http.get(detail_url)
-                    if detail.status_code == 200:
-                        body = detail.json() or {}
-                        description = html_to_text(
-                            body.get("jobAd", {}).get("sections", {}).get("jobDescription", {}).get("text")
-                            or body.get("jobAd", {}).get("text")
-                            or ""
-                        )
-                except Exception:
-                    logger.debug("SmartRecruiters detail skipped for %s", posting_id)
-            jobs.append(
-                Job(
-                    title=(item.get("name") or "").strip(),
-                    company=company_obj.get("name") or company or slug,
-                    source="smartrecruiters",
-                    url=item.get("ref") or f"https://jobs.smartrecruiters.com/{slug}/{posting_id}",
-                    location=location,
-                    is_remote=bool(loc.get("remote")),
-                    job_type=emp.get("label") or "",
-                    department=dept.get("label") or "",
-                    date_posted=format_posted_date(item.get("releasedDate")),
-                    description=description,
-                    apply_url=item.get("ref") or "",
-                    company_slug=slug,
-                )
-            )
+        listings.extend(batch)
         total = int(payload.get("totalFound") or 0)
         offset += len(batch)
         if not batch or offset >= total:
             break
-    return jobs
+    if query:
+        listings = [item for item in listings if title_matches(item.get("name") or "", query)]
+
+    def _one(item: dict[str, Any]) -> Job:
+        loc = item.get("location") or {}
+        location = loc.get("fullLocation") or join_location(
+            loc.get("city"), loc.get("region"), loc.get("country")
+        )
+        dept = item.get("department") or {}
+        emp = item.get("typeOfEmployment") or {}
+        company_obj = item.get("company") or {}
+        posting_id = str(item.get("id") or "")
+        description = ""
+        if posting_id:
+            try:
+                detail = http.get(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings/{posting_id}")
+                if detail.status_code == 200:
+                    body = detail.json() or {}
+                    description = html_to_text(
+                        body.get("jobAd", {}).get("sections", {}).get("jobDescription", {}).get("text")
+                        or body.get("jobAd", {}).get("text")
+                        or ""
+                    )
+            except Exception:
+                logger.debug("SmartRecruiters detail skipped for %s", posting_id)
+        return Job(
+            title=(item.get("name") or "").strip(),
+            company=company_obj.get("name") or company or slug,
+            source="smartrecruiters",
+            url=item.get("ref") or f"https://jobs.smartrecruiters.com/{slug}/{posting_id}",
+            location=location,
+            is_remote=bool(loc.get("remote")),
+            job_type=emp.get("label") or "",
+            department=dept.get("label") or "",
+            date_posted=format_posted_date(item.get("releasedDate")),
+            description=description,
+            apply_url=item.get("ref") or "",
+            company_slug=slug,
+        )
+
+    return map_pool(_one, listings, max_workers=12)
 
 
 def fetch_recruitee(http: Http, slug: str, company: str | None = None) -> list[Job]:
@@ -259,11 +268,9 @@ def fetch_workday(
     tenant, shard, site = parsed
     origin = f"https://{tenant}.{shard}.myworkdayjobs.com"
     list_url = f"{origin}/wday/cxs/{tenant}/{site}/jobs"
-    jobs: list[Job] = []
-    offset = 0
     limit = 20
-    total: int | None = None
-    while True:
+
+    def _page(offset: int) -> tuple[int, list[Job]]:
         response = http.post(
             list_url,
             json={"appliedFacets": {}, "limit": limit, "offset": offset, "searchText": search_text or ""},
@@ -274,18 +281,16 @@ def fetch_workday(
             },
         )
         if response.status_code in {404, 400}:
-            logger.warning("Workday board not found: %s", board_url)
-            return []
+            return 0, []
         response.raise_for_status()
         payload = response.json() or {}
-        if total is None:
-            total = int(payload.get("total") or 0)
-        batch = payload.get("jobPostings") or []
-        for item in batch:
+        total = int(payload.get("total") or 0)
+        found: list[Job] = []
+        for item in payload.get("jobPostings") or []:
             path = item.get("externalPath") or ""
             url = f"https://{tenant}.{shard}.myworkdayjobs.com/{site}{path}"
             location = item.get("locationsText") or ""
-            jobs.append(
+            found.append(
                 Job(
                     title=(item.get("title") or "").strip(),
                     company=company or tenant,
@@ -299,13 +304,22 @@ def fetch_workday(
                     extra={"site": site},
                 )
             )
-            if max_jobs and len(jobs) >= max_jobs:
-                return jobs
-        offset += len(batch)
-        if not batch or (total is not None and offset >= total):
+        return total, found
+
+    total, jobs = _page(0)
+    if not jobs and total == 0:
+        logger.warning("Workday board not found: %s", board_url)
+        return []
+    cap = min(total, 5000)
+    if max_jobs:
+        cap = min(cap, int(max_jobs))
+    offsets = list(range(limit, cap, limit))
+    for extra in map_pool(_page, offsets, max_workers=8):
+        jobs.extend(extra[1])
+        if max_jobs and len(jobs) >= max_jobs:
             break
-        if offset > 5000:
-            break
+    if max_jobs:
+        jobs = jobs[: int(max_jobs)]
     return jobs
 
 
@@ -366,7 +380,8 @@ def fetch_board(
     if not fetcher:
         raise ValueError(f"Unsupported ATS: {ats}")
     logger.info("Fetching %s board %s", ats, slug)
-    if ats.lower() == "workday":
+    key = ats.lower()
+    if key == "workday":
         jobs = fetch_workday(
             http,
             slug,
@@ -374,6 +389,12 @@ def fetch_board(
             max_jobs=max_jobs,
             search_text=query or "",
         )
+    elif key == "smartrecruiters":
+        jobs = fetch_smartrecruiters(http, slug, company, query=query)
+    elif key == "bamboohr":
+        from job_scraper.ats_extra import fetch_bamboohr
+
+        jobs = fetch_bamboohr(http, slug, company, query=query)
     else:
         jobs = fetcher(http, slug, company)
     return jobs
@@ -385,41 +406,48 @@ def fetch_all(
     usa_only: bool = True,
     max_jobs_per_board: int | None = 400,
     query: str | None = None,
+    progress: Progress | None = None,
 ) -> list[Job]:
     jobs: list[Job] = []
+    tasks = _ats_tasks(ats_config)
+
+    def _run(task: tuple[str, str, str | None]) -> list[Job]:
+        found = _collect_board(
+            http,
+            task[0],
+            task[1],
+            task[2],
+            usa_only=usa_only,
+            max_jobs_per_board=max_jobs_per_board,
+            query=query,
+        )
+        if progress:
+            label = "Y Combinator" if task[0] == "ycombinator" else f"{task[0]} {task[1]}"
+            progress.step(label)
+        return found
+
+    for found in map_pool(_run, tasks, max_workers=16):
+        jobs.extend(found)
+    return jobs
+
+
+def count_ats_tasks(ats_config: dict[str, Any] | None) -> int:
+    return len(_ats_tasks(ats_config or {}))
+
+
+def _ats_tasks(ats_config: dict[str, Any]) -> list[tuple[str, str, str | None]]:
+    tasks: list[tuple[str, str, str | None]] = []
     for ats, entries in (ats_config or {}).items():
         key = (ats or "").lower()
         if key == "ycombinator":
-            if not entries:
-                continue
-            jobs.extend(
-                _collect_board(
-                    http,
-                    "ycombinator",
-                    "all",
-                    None,
-                    usa_only=usa_only,
-                    max_jobs_per_board=max_jobs_per_board,
-                    query=query,
-                )
-            )
+            if entries:
+                tasks.append(("ycombinator", "all", None))
             continue
         for entry in entries or []:
             slug, company = _entry(ats, entry)
-            if not slug:
-                continue
-            jobs.extend(
-                _collect_board(
-                    http,
-                    ats,
-                    slug,
-                    company,
-                    usa_only=usa_only,
-                    max_jobs_per_board=max_jobs_per_board,
-                    query=query,
-                )
-            )
-    return jobs
+            if slug:
+                tasks.append((ats, slug, company))
+    return tasks
 
 
 def _collect_board(
@@ -440,7 +468,7 @@ def _collect_board(
         logger.exception("Failed fetching %s:%s", ats, slug)
         return []
     if query:
-        found = [job for job in found if _title_matches(job.title, query)]
+        found = [job for job in found if title_matches(job.title, query)]
     if usa_only:
         found = [job for job in found if looks_usa(job.location, job.is_remote)]
     if max_jobs_per_board:
@@ -475,14 +503,3 @@ def _first_name(items: Any) -> str:
     if isinstance(first, dict):
         return str(first.get("name") or "")
     return str(first)
-
-
-def _title_matches(title: str, query: str) -> bool:
-    q = (query or "").strip().lower()
-    if not q:
-        return True
-    hay = (title or "").lower()
-    if q in hay:
-        return True
-    tokens = [tok for tok in re.findall(r"[a-z0-9]+", q) if tok not in {"and", "or", "the", "a"}]
-    return bool(tokens) and all(tok in hay for tok in tokens)

@@ -13,6 +13,7 @@ boards:
   - indeed
   - zip_recruiter
   - linkedin
+  - freehire
 
 # Public career-board slugs (from the company's ATS URL).
 ats:

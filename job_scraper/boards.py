@@ -6,6 +6,8 @@ from typing import Any, Iterable
 
 from job_scraper.models import Job
 from job_scraper.normalize import format_posted_date, join_location
+from job_scraper.parallel import map_pool
+from job_scraper.progress import Progress
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,7 @@ def scrape_boards(
     hours_old: int | None = 168,
     linkedin_fetch_description: bool = False,
     proxies: list[str] | None = None,
+    progress: Progress | None = None,
 ) -> list[Job]:
     try:
         from jobspy import scrape_jobs
@@ -33,8 +36,7 @@ def scrape_boards(
     if not sites:
         return []
 
-    kwargs: dict[str, Any] = {
-        "site_name": sites,
+    base: dict[str, Any] = {
         "search_term": query,
         "location": location,
         "results_wanted": results_wanted,
@@ -42,26 +44,38 @@ def scrape_boards(
         "linkedin_fetch_description": linkedin_fetch_description,
     }
     if hours_old is not None:
-        kwargs["hours_old"] = hours_old
+        base["hours_old"] = hours_old
     if proxies:
-        kwargs["proxies"] = proxies
+        base["proxies"] = proxies
 
     logger.info("Scraping boards %s for %r in %r", sites, query, location)
     _LINKEDIN_RELATIVE.clear()
     _patch_linkedin_listed_times()
-    try:
-        frame = scrape_jobs(**kwargs)
-    except TypeError:
-        kwargs.pop("hours_old", None)
-        frame = scrape_jobs(**kwargs)
 
-    if frame is None or frame.empty:
-        return []
+    def _one(site: str) -> list[Job]:
+        kwargs = dict(base)
+        kwargs["site_name"] = [site]
+        try:
+            try:
+                frame = scrape_jobs(**kwargs)
+            except TypeError:
+                kwargs.pop("hours_old", None)
+                frame = scrape_jobs(**kwargs)
+        except Exception:
+            logger.exception("Board scrape failed: %s", site)
+            frame = None
+        jobs: list[Job] = []
+        if frame is not None and not frame.empty:
+            for row in frame.to_dict(orient="records"):
+                jobs.append(_from_jobspy(row))
+        if progress:
+            progress.step(site.replace("_", " "))
+        return jobs
 
-    jobs: list[Job] = []
-    for row in frame.to_dict(orient="records"):
-        jobs.append(_from_jobspy(row))
-    return jobs
+    found: list[Job] = []
+    for batch in map_pool(_one, sites, max_workers=max(1, len(sites))):
+        found.extend(batch)
+    return found
 
 
 def _from_jobspy(row: dict[str, Any]) -> Job:

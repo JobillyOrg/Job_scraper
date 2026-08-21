@@ -10,7 +10,8 @@ from urllib.parse import urljoin, urlparse
 
 from job_scraper.http import Http
 from job_scraper.models import Job
-from job_scraper.normalize import format_posted_date, html_to_text, join_location
+from job_scraper.normalize import format_posted_date, html_to_text, join_location, title_matches
+from job_scraper.parallel import map_pool
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,12 @@ def _not_found(response: Any) -> bool:
     return False
 
 
-def fetch_bamboohr(http: Http, slug: str, company: str | None = None) -> list[Job]:
+def fetch_bamboohr(
+    http: Http,
+    slug: str,
+    company: str | None = None,
+    query: str | None = None,
+) -> list[Job]:
     url = f"https://{slug}.bamboohr.com/careers/list"
     response = http.get(url, follow_redirects=False)
     if _not_found(response):
@@ -43,8 +49,11 @@ def fetch_bamboohr(http: Http, slug: str, company: str | None = None) -> list[Jo
         return []
     response.raise_for_status()
     payload = response.json() or {}
-    jobs: list[Job] = []
-    for item in payload.get("result") or []:
+    listings = list(payload.get("result") or [])
+    if query:
+        listings = [item for item in listings if title_matches(item.get("jobOpeningName") or "", query)]
+
+    def _one(item: dict[str, Any]) -> Job:
         job_id = str(item.get("id") or "")
         loc = item.get("location") or {}
         ats_loc = item.get("atsLocation") or {}
@@ -54,7 +63,7 @@ def fetch_bamboohr(http: Http, slug: str, company: str | None = None) -> list[Jo
             ats_loc.get("country"),
         )
         description = ""
-        if job_id and len(jobs) < 80:
+        if job_id:
             try:
                 detail = http.get(f"https://{slug}.bamboohr.com/careers/{job_id}/detail")
                 if detail.status_code == 200:
@@ -68,22 +77,21 @@ def fetch_bamboohr(http: Http, slug: str, company: str | None = None) -> list[Jo
                         location = join_location(dloc.get("city"), dloc.get("state"), dloc.get("country"))
             except Exception:
                 logger.debug("BambooHR detail skipped for %s", job_id)
-        jobs.append(
-            Job(
-                title=(item.get("jobOpeningName") or "").strip(),
-                company=company or slug,
-                source="bamboohr",
-                url=f"https://{slug}.bamboohr.com/careers/{job_id}" if job_id else "",
-                location=location,
-                is_remote=bool(item.get("isRemote")) or "remote" in location.lower(),
-                job_type=item.get("employmentStatusLabel") or item.get("employmentType") or "",
-                department=item.get("departmentLabel") or "",
-                description=description,
-                apply_url=f"https://{slug}.bamboohr.com/careers/{job_id}" if job_id else "",
-                company_slug=slug,
-            )
+        return Job(
+            title=(item.get("jobOpeningName") or "").strip(),
+            company=company or slug,
+            source="bamboohr",
+            url=f"https://{slug}.bamboohr.com/careers/{job_id}" if job_id else "",
+            location=location,
+            is_remote=bool(item.get("isRemote")) or "remote" in location.lower(),
+            job_type=item.get("employmentStatusLabel") or item.get("employmentType") or "",
+            department=item.get("departmentLabel") or "",
+            description=description,
+            apply_url=f"https://{slug}.bamboohr.com/careers/{job_id}" if job_id else "",
+            company_slug=slug,
         )
-    return jobs
+
+    return map_pool(_one, listings, max_workers=8)
 
 
 def fetch_personio(http: Http, slug: str, company: str | None = None) -> list[Job]:
@@ -592,15 +600,19 @@ def fetch_ycombinator(http: Http, slug: str = "all", company: str | None = None)
     seen: set[str] = set()
     jobs: list[Job] = []
     html_headers = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
-    for path in _YC_ROLE_PATHS:
+
+    def _page(path: str) -> list[dict[str, Any]]:
         try:
             response = http.get(f"https://www.workatastartup.com{path}", headers=html_headers)
         except Exception:
             logger.exception("Work at a Startup request failed for %s", path)
-            continue
+            return []
         if response.status_code != 200:
-            continue
-        for item in _yc_jobs_from_html(response.text):
+            return []
+        return _yc_jobs_from_html(response.text)
+
+    for batch in map_pool(_page, list(_YC_ROLE_PATHS), max_workers=8):
+        for item in batch:
             job_id = str(item.get("id") or "")
             if job_id and job_id in seen:
                 continue

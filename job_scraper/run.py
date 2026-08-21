@@ -5,47 +5,93 @@ from pathlib import Path
 
 import pandas as pd
 
-from job_scraper.ats import fetch_all
+from job_scraper.ats import count_ats_tasks, fetch_all
 from job_scraper.boards import scrape_boards
 from job_scraper.db import upsert_jobs
+from job_scraper.freehire import fetch_freehire
 from job_scraper.http import Http
 from job_scraper.models import Job
+from job_scraper.parallel import gather
+from job_scraper.progress import Progress
 
 logger = logging.getLogger(__name__)
 
 
-def run_scrape(config: dict) -> list[Job]:
-    jobs: list[Job] = []
-    boards = config.get("boards") or []
-    if boards:
+def run_scrape(config: dict, progress: Progress | None = None) -> list[Job]:
+    boards = list(config.get("boards") or [])
+    jobspy_boards = [name for name in boards if name != "freehire"]
+    ats = config.get("ats") or {}
+    want_freehire = "freehire" in boards
+    query = config["query"]
+    location = config.get("location") or "United States"
+    usa_only = bool(config.get("usa_only", True))
+    results_wanted = int(config.get("results_wanted") or 100)
+    total = len(jobspy_boards) + (1 if want_freehire else 0) + count_ats_tasks(ats)
+    if progress:
+        progress.set_total(total, "Fetching sources…")
+
+    def _boards() -> list[Job]:
+        if not jobspy_boards:
+            return []
         try:
-            jobs.extend(
-                scrape_boards(
-                    query=config["query"],
-                    location=config.get("location") or "United States",
-                    site_name=boards,
-                    country_indeed=config.get("country_indeed") or "USA",
-                    results_wanted=int(config.get("results_wanted") or 100),
-                    hours_old=config.get("hours_old"),
-                    linkedin_fetch_description=bool(config.get("linkedin_fetch_description")),
-                    proxies=config.get("proxies"),
-                )
+            return scrape_boards(
+                query=query,
+                location=location,
+                site_name=jobspy_boards,
+                country_indeed=config.get("country_indeed") or "USA",
+                results_wanted=results_wanted,
+                hours_old=config.get("hours_old"),
+                linkedin_fetch_description=bool(config.get("linkedin_fetch_description")),
+                proxies=config.get("proxies"),
+                progress=progress,
             )
         except Exception:
-            logger.exception("Job board scrape failed (LinkedIn/Indeed often block). Continuing with ATS.")
+            logger.exception("Job board scrape failed (LinkedIn/Indeed often block). Continuing with other sources.")
+            return []
 
-    ats = config.get("ats") or {}
-    if ats:
+    def _freehire() -> list[Job]:
+        if not want_freehire:
+            return []
+        try:
+            with Http() as http:
+                jobs = fetch_freehire(
+                    http,
+                    query=query,
+                    location=location,
+                    results_wanted=results_wanted,
+                    hours_old=config.get("hours_old"),
+                    usa_only=usa_only,
+                )
+            if progress:
+                progress.step("Freehire")
+            return jobs
+        except Exception:
+            logger.exception("Freehire search failed")
+            if progress:
+                progress.step("Freehire")
+            return []
+
+    def _ats() -> list[Job]:
+        if not ats:
+            return []
         with Http() as http:
-            jobs.extend(fetch_all(
+            return fetch_all(
                 http,
                 ats,
-                usa_only=bool(config.get("usa_only", True)),
+                usa_only=usa_only,
                 max_jobs_per_board=config.get("max_jobs_per_board"),
-                query=config.get("query"),
-            ))
+                query=query,
+                progress=progress,
+            )
 
-    return _dedupe(jobs)
+    tasks = []
+    if jobspy_boards:
+        tasks.append(_boards)
+    if want_freehire:
+        tasks.append(_freehire)
+    if ats:
+        tasks.append(_ats)
+    return _dedupe(gather(tasks, max_workers=3))
 
 
 def save_jobs(jobs: list[Job], output: str | Path) -> Path:
